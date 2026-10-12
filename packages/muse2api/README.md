@@ -51,6 +51,8 @@ Pick **Connect to a muse2api instance**. It asks for the instance address (the d
 
 The plain key method is also offered, if you would rather not be checked. An instance at a non-default address can also be named by the provider's `baseURL` option or the `MUSE2API_BASE_URL` environment variable; the address saved at connect wins over both.
 
+**An instance on another machine.** Connecting works the same, and the sign-in says so at the time: the key and the account pool live at that address. The plugin deliberately reads an instance's pool (its `/admin` endpoints) only when the instance is on this machine — for a remote instance, connect checks the key without reading the pool, and the usage card cannot show it. If the remote instance is yours and you do want its pool read, set `MUSE2API_ALLOW_REMOTE_ADMIN=1` in the environment magpie runs in.
+
 In OpenCode without magpie, add `"@magpie-community/opencode-muse2api-auth"` to the `plugin` array in `opencode.json`, then `opencode auth login` and pick muse2api. Either way the key is kept in the tool's own auth store, like every other package's sign-in.
 
 ## Step 3 — use it
@@ -77,6 +79,7 @@ magpie's usage card (`magpie quota`) shows the instance's account pool — how m
 | `refused that key` at sign-in | the key isn't the instance's `MUSE2API_KEY` | copy it from the instance's `.env`, exactly |
 | `没有可用账号` ("no accounts available") from a test or an agent | the chain works; the instance has no usable Muse account | finish step 1, or re-import — the session may have expired |
 | `401` from an agent but sign-in worked | the instance was restarted with a different key | sign in again so magpie holds the current key |
+| `the account pool is read only from an instance on this machine` on the usage card | the instance is at a remote address and /admin reads are off by default | set `MUSE2API_ALLOW_REMOTE_ADMIN=1` if the remote instance is yours |
 | model list shows only `muse-spark` | that's the instance's chat model | `muse-image` / `muse-video` are media endpoints, not chat models, and are deliberately not offered to agents |
 
 Good to know: muse.ai's web API returns no structured tool calls, so muse2api reconstructs them from the model's reply. Ordinary agent work holds up; very exotic tool schemas are where it can fray — if an agent misbehaves on one specific tool, that layer is why.

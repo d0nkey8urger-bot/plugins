@@ -13,6 +13,12 @@
 // the live instance before anything is saved — a wrong address or key
 // fails there, in words, not later as a dead provider. The Muse
 // account itself is imported into the instance, never here.
+//
+// The instance's /admin endpoints hold its account pool, so the
+// plugin calls them only when the address is on this machine
+// (loopback) — or when the user opts in for an instance elsewhere
+// (MUSE2API_ALLOW_REMOTE_ADMIN=1). Checking a sign-in anywhere uses
+// /v1/models, an ordinary authenticated endpoint.
 
 const ID = "muse2api"
 const CHAT = "@ai-sdk/openai-compatible"
@@ -44,6 +50,19 @@ function adminURL(base, path) {
   return base.replace(/\/v1$/, "") + path
 }
 
+function isLoopback(base) {
+  try {
+    const h = new URL(base).hostname.replace(/^\[|\]$/g, "").toLowerCase()
+    return h === "localhost" || h.endsWith(".localhost") || h === "::1" || h.startsWith("127.")
+  } catch {
+    return false
+  }
+}
+
+function adminAllowed(base, env = process.env) {
+  return isLoopback(base) || env.MUSE2API_ALLOW_REMOTE_ADMIN === "1"
+}
+
 function modelEntry(m) {
   return {
     name: m.name,
@@ -66,15 +85,18 @@ async function ask(base, key, url, timeoutMs = 10_000) {
   }
 }
 
-// probe checks an address and key against the live instance and reads
-// its account pool. A wrong key and a dead address are different
-// failures and are said differently; a pool that cannot be read is
-// not fatal — the key was accepted, which is what sign-in promises.
+// probe checks an address and key against the live instance and,
+// where /admin may be called (see the header), reads its account
+// pool. A wrong key and a dead address are different failures and
+// are said differently; a pool that cannot be read is not fatal —
+// the key was accepted, which is what sign-in promises. The pool of
+// an instance elsewhere is "remote": deliberately not read.
 async function probe(base, key) {
   const res = await ask(base, key, `${base}/models`)
   if (res.status === 401 || res.status === 403)
     throw new Error(`The instance at ${base} refused that key — it isn't the MUSE2API_KEY the instance was started with (see its .env).`)
   if (!res.ok) throw new Error(`The instance at ${base} answered /v1/models with ${res.status} — is that really a muse2api instance?`)
+  if (!adminAllowed(base)) return "remote"
   try {
     const s = await ask(base, key, adminURL(base, "/admin/status"))
     if (s.ok) return (await s.json())?.stats ?? null
@@ -98,13 +120,15 @@ async function connect(inputs) {
   if (!/^https?:$/.test(u.protocol)) throw new Error(`"${base}" isn't an http(s) address — the instance address looks like ${DEFAULT_BASE}`)
   if (!key) throw new Error("Paste the instance's MUSE2API_KEY — it's the MUSE2API_KEY line in the .env the instance was started with.")
   const pool = await probe(base, key)
-  const ready = pool ? `${pool.healthy ?? 0} of ${pool.enabled ?? pool.total ?? 0} Muse accounts ready` : null
+  const ready = pool && pool !== "remote" ? `${pool.healthy ?? 0} of ${pool.enabled ?? pool.total ?? 0} Muse accounts ready` : null
   return {
     url: "",
     instructions:
-      pool && (pool.total ?? 0) === 0
-        ? `Connected to the instance at ${base}, but it has no Muse account yet — import one there (its tools/get_muse_cookie.py needs no browser extension), then this provider can answer.`
-        : `Connected to the instance at ${base}${ready ? `: ${ready}` : ""}.`,
+      pool === "remote"
+        ? `Connected to the instance at ${base}. It is not on this machine: the key and the account pool live at that address, and the plugin reads an instance's pool only on this machine (or with MUSE2API_ALLOW_REMOTE_ADMIN=1), so the pool is not shown for it here.`
+        : pool && (pool.total ?? 0) === 0
+          ? `Connected to the instance at ${base}, but it has no Muse account yet — import one there (its tools/get_muse_cookie.py needs no browser extension), then this provider can answer.`
+          : `Connected to the instance at ${base}${ready ? `: ${ready}` : ""}.`,
     method: "auto",
     callback: async () => ({ type: "success", provider: ID, key, metadata: { base } }),
   }
@@ -127,7 +151,7 @@ export async function Muse2apiPlugin({ client } = {}) {
           type: "oauth",
           label: "Connect to a muse2api instance",
           prompts: [
-            { type: "text", key: "base", message: "Your muse2api instance address", placeholder: DEFAULT_BASE },
+            { type: "text", key: "base", message: "Your muse2api instance address (its key and account pool live at this address)", placeholder: DEFAULT_BASE },
             { type: "text", key: "key", message: "Its MUSE2API_KEY", placeholder: "m2a_…" },
           ],
           authorize: connect,
@@ -141,6 +165,11 @@ export async function Muse2apiPlugin({ client } = {}) {
         const auth = await getAuth()
         if (auth?.type !== "api" || !auth.key) return { error: "not signed in", signIn: "kept" }
         const base = baseURL(undefined, auth)
+        if (!adminAllowed(base))
+          return {
+            error: "the account pool is read only from an instance on this machine — set MUSE2API_ALLOW_REMOTE_ADMIN=1 to read it from this remote instance",
+            signIn: "kept",
+          }
         let res
         try {
           res = await ask(base, auth.key, adminURL(base, "/admin/status"))

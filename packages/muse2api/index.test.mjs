@@ -198,3 +198,78 @@ test("config hook: a user's own model entries survive", async () => {
   await hooks.config(cfg)
   assert.deepEqual(Object.keys(cfg.provider.muse2api.models).sort(), ["mine", "muse-spark"])
 })
+
+// ---- the /admin boundary: an instance's pool is read only on this
+// machine, unless the user opts in for a remote one -----------------
+
+// fetch replaced for one test: the module reads the global at call
+// time, so a remote instance is simulated without a network.
+function stubFetch(t, handler) {
+  const real = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    return handler(String(url))
+  }
+  t.after(() => {
+    globalThis.fetch = real
+  })
+  return calls
+}
+const jsonRes = (status, body) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })
+const remoteAuth = async () => ({ type: "api", key: "m2a_remote", metadata: { base: "http://10.0.0.9:18610/v1" } })
+
+test("connect: a remote instance is validated by /v1 only — its pool is never read", async (t) => {
+  const calls = stubFetch(t, (url) =>
+    url.endsWith("/v1/models") ? jsonRes(200, { object: "list", data: [{ id: "muse-spark" }] }) : jsonRes(404, {}),
+  )
+  const hooks = await Muse2apiPlugin(ctx)
+  const offer = await hooks.auth.methods[0].authorize({ base: "http://10.0.0.9:18610/v1", key: "m2a_remote" })
+  assert.match(offer.instructions, /not on this machine/)
+  assert.match(offer.instructions, /account pool live at that address/)
+  assert.ok(calls.length > 0 && calls.every((u) => !u.includes("/admin/")), `no /admin call, got: ${calls}`)
+  const done = await offer.callback()
+  assert.equal(done.type, "success")
+  assert.equal(done.metadata.base, "http://10.0.0.9:18610/v1")
+})
+
+test("connect: a remote instance still refuses a wrong key in words", async (t) => {
+  stubFetch(t, () => jsonRes(401, { error: "unauthorized" }))
+  const hooks = await Muse2apiPlugin(ctx)
+  await assert.rejects(
+    () => hooks.auth.methods[0].authorize({ base: "http://10.0.0.9:18610/v1", key: "m2a_wrong" }),
+    /refused that key/,
+  )
+})
+
+test("usage: a remote instance's pool is not read without the opt-in", async () => {
+  const hooks = await Muse2apiPlugin(ctx)
+  const out = await hooks.auth.usage(remoteAuth)
+  assert.match(out.error, /MUSE2API_ALLOW_REMOTE_ADMIN=1/)
+  assert.equal(out.signIn, "kept")
+})
+
+test("usage: the opt-in reads a remote instance's pool", async (t) => {
+  stubFetch(t, (url) =>
+    url.endsWith("/admin/status") ? jsonRes(200, { stats: { total: 2, enabled: 2, healthy: 1 } }) : jsonRes(404, {}),
+  )
+  process.env.MUSE2API_ALLOW_REMOTE_ADMIN = "1"
+  t.after(() => delete process.env.MUSE2API_ALLOW_REMOTE_ADMIN)
+  const hooks = await Muse2apiPlugin(ctx)
+  const out = await hooks.auth.usage(remoteAuth)
+  assert.equal(out.windows[0].display, "1 of 2 accounts ready")
+})
+
+test("connect: with the opt-in, a remote instance's pool is read and reported", async (t) => {
+  stubFetch(t, (url) => {
+    if (url.endsWith("/v1/models")) return jsonRes(200, { object: "list", data: [{ id: "muse-spark" }] })
+    if (url.endsWith("/admin/status")) return jsonRes(200, { stats: { total: 2, enabled: 2, healthy: 1 } })
+    return jsonRes(404, {})
+  })
+  process.env.MUSE2API_ALLOW_REMOTE_ADMIN = "1"
+  t.after(() => delete process.env.MUSE2API_ALLOW_REMOTE_ADMIN)
+  const hooks = await Muse2apiPlugin(ctx)
+  const offer = await hooks.auth.methods[0].authorize({ base: "http://10.0.0.9:18610/v1", key: "m2a_remote" })
+  assert.match(offer.instructions, /1 of 2 Muse accounts ready/)
+})
