@@ -1,72 +1,89 @@
-# muse2api — Muse (muse.ai) in OpenCode and magpie
+# Muse (muse2api)
 
-Signs in to: **a [muse2api](https://github.com/czg86389-hub/muse2api)
-instance you run yourself**, which serves **Muse (muse.ai)** as an
-OpenAI-compatible API. Provider id: `muse2api`.
+Use [Muse](https://muse.ai) (Meta's assistant) as a model in Codex, OpenCode and the other agents magpie drives — through a [muse2api](https://github.com/czg86389-hub/muse2api) instance you run yourself.
 
-Unlike the other packages here, this plugin does not talk to the
-vendor's site. muse2api does that part: it drives the muse.ai web app
-from a local Chromium, keeps the session alive (48h auto-renewal), and
-exposes chat, image and video endpoints. This plugin only tells
-OpenCode / magpie where the instance lives, which key it takes and
-which model it serves — so signing in here means pasting the
-instance's `MUSE2API_KEY`, nothing more.
+muse2api turns the muse.ai web app into an OpenAI-compatible API: it drives the site from a local Chromium, keeps the session alive, and serves chat, image and video endpoints. This plugin is the adapter between magpie and that instance — it declares the model, carries the instance's address and key, reads its live model list, and shows its account pool on magpie's usage card. The Muse account itself is imported into the instance; the plugin never sees it.
 
-## Before you sign in
+> muse2api is an unofficial bridge that drives muse.ai through its web UI. Requests use your own Muse account's web quota, and the project's own caveats (terms of service, account risk) apply — whether it fits how you use your account is your call.
 
-1. Run muse2api on your machine (Docker Compose, or plain Python —
-   no other dependencies) and set its `MUSE2API_KEY`.
-2. Import your Muse account into the instance once: its browser
-   extension, its Tampermonkey script, or `tools/get_muse_cookie.py`
-   (a standard-library Python script that opens a throwaway Chrome
-   window for you to sign in to muse.ai in — no extension needed).
-3. Check the instance answers at `http://127.0.0.1:18610/v1/models`.
+## Step 0 — run muse2api
 
-## Use
+On the machine your agents run on (or any machine they can reach):
 
-magpie:
-
-```
-magpie plugin add @magpie-community/opencode-muse2api-auth
-magpie plugin login muse2api        # paste the instance's MUSE2API_KEY
+```sh
+git clone https://github.com/czg86389-hub/muse2api
+cd muse2api
+cp .env.example .env   # set MUSE2API_KEY to a key of your own in .env
+docker compose up -d
 ```
 
-OpenCode, in `opencode.json`:
+No Docker? muse2api also runs bare on Python 3.12 with a local Chrome — see its README. Either way it listens on `http://127.0.0.1:18610` by default, and its admin page is at `http://127.0.0.1:18610/admin?key=<your MUSE2API_KEY>`.
 
+## Step 1 — give the instance your Muse account
+
+```sh
+python3 tools/get_muse_cookie.py
 ```
-{ "plugin": ["@magpie-community/opencode-muse2api-auth"] }
+
+in the muse2api folder. It opens a throwaway Chrome window; sign in to muse.ai there and it imports the session by itself — no browser extension, no Tampermonkey script, nothing pasted into a chat. (The admin page offers the other import methods too.) Sessions renew themselves, so an instance typically keeps answering for weeks unattended.
+
+Check it worked: the admin page lists your account, and
+
+```sh
+curl http://127.0.0.1:18610/v1/models -H "Authorization: Bearer <your MUSE2API_KEY>"
 ```
 
-then `opencode auth login` and pick muse2api.
+lists `muse-spark`.
 
-The key is kept in OpenCode's / magpie's own auth store, like every
-other package's sign-in.
+## Step 2 — connect magpie to the instance
 
-## Models
+Install this plugin, then sign in:
 
-| Model | What it is |
-| --- | --- |
-| `muse-spark` | Muse Spark — chat and code, streaming, with tool calls |
+```sh
+magpie plugin login muse2api
+```
 
-The instance also serves `muse-image` and `muse-video`; those are
-media endpoints, not chat models, so they are not declared here.
-muse.ai routes behind its web UI and publishes no context size, so
-the model declares no limits.
+Pick **Connect to a muse2api instance**. It asks for the instance address (the default `http://127.0.0.1:18610/v1` is prefilled) and its `MUSE2API_KEY`, and **checks both against the live instance before saving anything**:
 
-## Where the instance lives
+- a dead address fails there — *"Couldn't reach a muse2api instance…"*
+- a wrong key fails there — *"The instance … refused that key…"*
+- an instance with no Muse account yet still connects, and tells you to finish step 1
 
-Default: `http://127.0.0.1:18610/v1`. To point at an instance running
-elsewhere (another machine, a VPS, a different port), set either:
+The plain key method is also offered, if you would rather not be checked. An instance at a non-default address can also be named by the provider's `baseURL` option or the `MUSE2API_BASE_URL` environment variable; the address saved at connect wins over both.
 
-- the provider's `baseURL` option in your config, or
-- the environment variable `MUSE2API_BASE_URL`
+In OpenCode without magpie, add `"@magpie-community/opencode-muse2api-auth"` to the `plugin` array in `opencode.json`, then `opencode auth login` and pick muse2api. Either way the key is kept in the tool's own auth store, like every other package's sign-in.
 
-The provider option wins over the environment variable.
+## Step 3 — use it
 
-## Notes
+```sh
+magpie codex muse2api/muse-spark
+```
 
-- Requests burn your own Muse account's web quota, through the
-  instance. muse2api is an unofficial reverse-engineering project;
-  its own README's caveats (terms of service, account risk) apply.
-- The instance serves a bounded number of concurrent generations
-  (2 by default), so the package caps concurrency at 2.
+or pick `muse2api/muse-spark` in any agent magpie configures. Verify the whole chain any time with
+
+```sh
+magpie provider test muse2api
+```
+
+That sends one real (tiny) request through magpie → this plugin → your instance → muse.ai.
+
+magpie's usage card (`magpie quota`) shows the instance's account pool — how many Muse accounts it holds and how many are ready — read live from the instance. The instance serves a bounded number of concurrent generations (2 by default), so the package caps concurrency at 2 to match.
+
+## Troubleshooting
+
+| What you see | What it means | Fix |
+|---|---|---|
+| `Couldn't reach a muse2api instance` at sign-in | nothing is listening at that address | start the instance (step 0); check the address and port |
+| `refused that key` at sign-in | the key isn't the instance's `MUSE2API_KEY` | copy it from the instance's `.env`, exactly |
+| `没有可用账号` ("no accounts available") from a test or an agent | the chain works; the instance has no usable Muse account | finish step 1, or re-import — the session may have expired |
+| `401` from an agent but sign-in worked | the instance was restarted with a different key | sign in again so magpie holds the current key |
+| model list shows only `muse-spark` | that's the instance's chat model | `muse-image` / `muse-video` are media endpoints, not chat models, and are deliberately not offered to agents |
+
+Good to know: muse.ai's web API returns no structured tool calls, so muse2api reconstructs them from the model's reply. Ordinary agent work holds up; very exotic tool schemas are where it can fray — if an agent misbehaves on one specific tool, that layer is why.
+
+## Development
+
+```sh
+bun test                              # in this folder
+bun scripts/check.mjs muse2api        # from the repo root
+```
